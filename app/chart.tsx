@@ -24,7 +24,7 @@ import { fetchFearGreedIndex, FearGreedData } from '@/lib/fearGreedApi';
 import { addFavorite, removeFavorite, isFavorite } from '@/lib/storage';
 import { getTimeframeRiskLevel, getTradingStyle, TradingStyle } from '@/lib/tradingStyles';
 import { AlertConfig, getAlertsForSymbol } from '@/lib/alertsStorage';
-import { apiRequest, isBackendAvailable } from '@/lib/query-client';
+import { apiRequest, isBackendAvailable, checkBackendHealth } from '@/lib/query-client';
 import { useTheme } from '@/lib/ThemeContext';
 
 type AnalysisMode = 'signals' | 'alerts';
@@ -298,7 +298,10 @@ export default function ChartScreen() {
     
     setIsAnalyzing(true);
     
-    if (!isBackendAvailable()) {
+    const backendUp = isBackendAvailable() ? await checkBackendHealth() : false;
+    
+    if (!backendUp) {
+      console.log('Backend unreachable, using local analysis');
       setAiAnalysis(generateLocalAnalysis());
       setIsAnalyzing(false);
       return;
@@ -329,7 +332,7 @@ export default function ChartScreen() {
       if (!analysis.confidence) analysis.confidence = Math.max(analysis.longConfidence || 50, analysis.shortConfidence || 50);
       setAiAnalysis(analysis);
     } catch (error) {
-      console.error('AI analysis error:', error);
+      console.log('AI analysis failed, using local fallback:', error);
       setAiAnalysis(generateLocalAnalysis());
     }
     
@@ -342,7 +345,9 @@ export default function ChartScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsGeneratingTrade(true);
     
-    if (!isBackendAvailable()) {
+    const backendUp2 = isBackendAvailable() ? await checkBackendHealth() : false;
+    
+    if (!backendUp2) {
       const p = price || candles[candles.length - 1]?.close || 0;
       const ind = calculateIndicators(candles);
       const lastIdx = candles.length - 1;

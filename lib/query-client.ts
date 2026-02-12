@@ -1,10 +1,6 @@
 import { fetch } from "expo/fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
-/**
- * Gets the base URL for the Express API server (e.g., "http://localhost:3000")
- * @returns {string} The API base URL
- */
 export function getApiUrl(): string {
   let host = process.env.EXPO_PUBLIC_DOMAIN;
 
@@ -17,8 +13,33 @@ export function getApiUrl(): string {
   return url.href;
 }
 
+let backendReachable: boolean | null = null;
+let lastBackendCheck = 0;
+
 export function isBackendAvailable(): boolean {
-  return !!process.env.EXPO_PUBLIC_DOMAIN;
+  if (!process.env.EXPO_PUBLIC_DOMAIN) return false;
+  if (backendReachable === false && Date.now() - lastBackendCheck < 60000) return false;
+  return true;
+}
+
+export async function checkBackendHealth(): Promise<boolean> {
+  if (!process.env.EXPO_PUBLIC_DOMAIN) return false;
+
+  try {
+    const controller = new AbortController();
+    const id = globalThis.setTimeout(() => controller.abort(), 5000);
+    const baseUrl = getApiUrl();
+    const res = await fetch(`${baseUrl}api/symbols/spot`, { signal: controller.signal });
+    globalThis.clearTimeout(id);
+    const ok = res.ok;
+    backendReachable = ok;
+    lastBackendCheck = Date.now();
+    return ok;
+  } catch {
+    backendReachable = false;
+    lastBackendCheck = Date.now();
+    return false;
+  }
 }
 
 async function throwIfResNotOk(res: Response) {
@@ -34,17 +55,34 @@ export async function apiRequest(
   data?: unknown | undefined,
 ): Promise<Response> {
   const baseUrl = getApiUrl();
+  if (!baseUrl) throw new Error('Backend not configured');
+
   const url = new URL(route, baseUrl);
 
-  const res = await fetch(url.toString(), {
-    method,
-    headers: data ? { "Content-Type": "application/json" } : {},
-    body: data ? JSON.stringify(data) : undefined,
-    credentials: "include",
-  });
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 30000);
 
-  await throwIfResNotOk(res);
-  return res;
+  try {
+    const res = await fetch(url.toString(), {
+      method,
+      headers: data ? { "Content-Type": "application/json" } : {},
+      body: data ? JSON.stringify(data) : undefined,
+      signal: controller.signal,
+    });
+
+    globalThis.clearTimeout(timeoutId);
+
+    backendReachable = true;
+    lastBackendCheck = Date.now();
+
+    await throwIfResNotOk(res);
+    return res;
+  } catch (e) {
+    globalThis.clearTimeout(timeoutId);
+    backendReachable = false;
+    lastBackendCheck = Date.now();
+    throw e;
+  }
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";
@@ -56,9 +94,7 @@ export const getQueryFn: <T>(options: {
     const baseUrl = getApiUrl();
     const url = new URL(queryKey.join("/") as string, baseUrl);
 
-    const res = await fetch(url.toString(), {
-      credentials: "include",
-    });
+    const res = await fetch(url.toString());
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;
