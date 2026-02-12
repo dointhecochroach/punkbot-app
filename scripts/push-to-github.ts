@@ -41,8 +41,9 @@ async function getAccessToken() {
 const IGNORE_DIRS = new Set(['node_modules', '.git', '.cache', '.local', '.config', '.npm', '.upm', 'attached_assets', '.replit']);
 const IGNORE_FILES = new Set(['replit.nix', '.replit']);
 
-function getAllFiles(dir: string, baseDir: string): { path: string; content: string }[] {
-  const files: { path: string; content: string }[] = [];
+function getAllFiles(dir: string, baseDir: string): { path: string; content: string; isBinary: boolean }[] {
+  const files: { path: string; content: string; isBinary: boolean }[] = [];
+  const BINARY_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.bmp', '.ttf', '.otf', '.woff', '.woff2', '.eot', '.zip', '.tar', '.gz', '.pdf', '.aab', '.apk']);
 
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
@@ -56,10 +57,9 @@ function getAllFiles(dir: string, baseDir: string): { path: string; content: str
       if (!IGNORE_FILES.has(entry.name)) {
         try {
           const content = fs.readFileSync(fullPath);
-          const isText = !content.some(byte => byte === 0);
-          if (isText) {
-            files.push({ path: relativePath, content: content.toString('base64') });
-          }
+          const ext = path.extname(entry.name).toLowerCase();
+          const isBinary = BINARY_EXTENSIONS.has(ext) || content.some(byte => byte === 0);
+          files.push({ path: relativePath, content: content.toString('base64'), isBinary });
         } catch {}
       }
     }
@@ -107,12 +107,33 @@ async function main() {
     const { data: ref } = await octokit.git.getRef({ owner: user.login, repo: repoName, ref: 'heads/main' });
     const latestCommitSha = ref.object.sha;
 
-    const treeItems = files.map(f => ({
-      path: f.path,
-      mode: '100644' as const,
-      type: 'blob' as const,
-      content: Buffer.from(f.content, 'base64').toString('utf-8'),
-    }));
+    const treeItems: any[] = [];
+
+    for (const f of files) {
+      if (f.isBinary) {
+        const { data: blob } = await octokit.git.createBlob({
+          owner: user.login,
+          repo: repoName,
+          content: f.content,
+          encoding: 'base64',
+        });
+        treeItems.push({
+          path: f.path,
+          mode: '100644' as const,
+          type: 'blob' as const,
+          sha: blob.sha,
+        });
+      } else {
+        treeItems.push({
+          path: f.path,
+          mode: '100644' as const,
+          type: 'blob' as const,
+          content: Buffer.from(f.content, 'base64').toString('utf-8'),
+        });
+      }
+    }
+
+    console.log(`Uploaded ${files.filter(f => f.isBinary).length} binary files`);
 
     const batchSize = 100;
     let currentTree = latestCommitSha;
