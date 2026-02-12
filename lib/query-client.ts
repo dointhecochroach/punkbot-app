@@ -9,12 +9,16 @@ export function getApiUrl(): string {
   let host = process.env.EXPO_PUBLIC_DOMAIN;
 
   if (!host) {
-    throw new Error("EXPO_PUBLIC_DOMAIN is not set");
+    return '';
   }
 
   let url = new URL(`https://${host}`);
 
   return url.href;
+}
+
+export function isBackendAvailable(): boolean {
+  return !!process.env.EXPO_PUBLIC_DOMAIN;
 }
 
 async function throwIfResNotOk(res: Response) {

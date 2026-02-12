@@ -24,13 +24,14 @@ import { fetchFearGreedIndex, FearGreedData } from '@/lib/fearGreedApi';
 import { addFavorite, removeFavorite, isFavorite } from '@/lib/storage';
 import { getTimeframeRiskLevel, getTradingStyle, TradingStyle } from '@/lib/tradingStyles';
 import { AlertConfig, getAlertsForSymbol } from '@/lib/alertsStorage';
-import { apiRequest } from '@/lib/query-client';
+import { apiRequest, isBackendAvailable } from '@/lib/query-client';
 import { useTheme } from '@/lib/ThemeContext';
 
 type AnalysisMode = 'signals' | 'alerts';
 
 interface AIAnalysisData {
   signal: 'LONG' | 'SHORT' | 'NEUTRAL';
+  confidence: number;
   longConfidence: number;
   shortConfidence: number;
   summary: string;
@@ -120,7 +121,7 @@ export default function ChartScreen() {
   const quoteAsset = params.quoteAsset || 'USDT';
   const isFutures = params.isFutures === '1';
   
-  const [interval, setInterval] = useState<TimeInterval>('1h');
+  const [timeInterval, setTimeInterval] = useState<TimeInterval>('1h');
   const [candles, setCandles] = useState<Candle[]>([]);
   const [price, setPrice] = useState<number | null>(null);
   const [priceChange, setPriceChange] = useState<number | null>(null);
@@ -163,7 +164,7 @@ export default function ChartScreen() {
     loadCandles();
     setAiAnalysis(null);
     setTradeIdea(null);
-  }, [interval]);
+  }, [timeInterval]);
   
   const loadTradingStyle = async () => {
     const style = await getTradingStyle();
@@ -183,7 +184,7 @@ export default function ChartScreen() {
   };
   
   const loadCandles = async () => {
-    const data = await fetchKlines(symbol, interval, isFutures, 100);
+    const data = await fetchKlines(symbol, timeInterval, isFutures, 100);
     setCandles(data);
   };
   
@@ -217,7 +218,7 @@ export default function ChartScreen() {
   };
   
   const handleIntervalChange = (newInterval: TimeInterval) => {
-    setInterval(newInterval);
+    setTimeInterval(newInterval);
   };
   
   const handleFavorite = async () => {
@@ -241,10 +242,67 @@ export default function ChartScreen() {
     }
   }, [candles, tradingStyle]);
   
+  const generateLocalAnalysis = (): AIAnalysisData => {
+    const ind = calculateIndicators(candles);
+    const lastIndex = candles.length - 1;
+    const rsi = ind.rsi[lastIndex] || 50;
+    const macd = ind.macd[lastIndex] || { macd: 0, signal: 0, histogram: 0 };
+    const adx = ind.adx[lastIndex] || { adx: 0, plusDI: 0, minusDI: 0 };
+    const bop = ind.bop[lastIndex] || 0;
+    
+    let longScore = 50;
+    let shortScore = 50;
+    
+    if (rsi < 30) { longScore += 20; shortScore -= 15; }
+    else if (rsi < 40) { longScore += 10; shortScore -= 5; }
+    else if (rsi > 70) { shortScore += 20; longScore -= 15; }
+    else if (rsi > 60) { shortScore += 10; longScore -= 5; }
+    
+    if (macd.histogram > 0) { longScore += 10; shortScore -= 5; }
+    else if (macd.histogram < 0) { shortScore += 10; longScore -= 5; }
+    
+    if (adx.plusDI > adx.minusDI) { longScore += 10; shortScore -= 5; }
+    else if (adx.minusDI > adx.plusDI) { shortScore += 10; longScore -= 5; }
+    
+    if (bop > 0.3) { longScore += 5; } else if (bop < -0.3) { shortScore += 5; }
+    
+    longScore = Math.max(5, Math.min(95, longScore));
+    shortScore = Math.max(5, Math.min(95, shortScore));
+    
+    const signal: 'LONG' | 'SHORT' | 'NEUTRAL' = longScore > shortScore + 15 ? 'LONG' : shortScore > longScore + 15 ? 'SHORT' : 'NEUTRAL';
+    const confidence = Math.max(longScore, shortScore);
+    
+    const rsiZone = rsi > 70 ? 'overbought' : rsi < 30 ? 'oversold' : 'neutral';
+    const trendDir = adx.plusDI > adx.minusDI ? 'bullish' : 'bearish';
+    
+    return {
+      signal,
+      confidence,
+      longConfidence: longScore,
+      shortConfidence: shortScore,
+      summary: `Local analysis for ${symbol}: RSI at ${rsi.toFixed(1)} (${rsiZone}), MACD histogram ${macd.histogram > 0 ? 'positive' : 'negative'}, ADX shows ${trendDir} pressure. ${signal === 'LONG' ? 'Leaning bullish, punk.' : signal === 'SHORT' ? 'Bears in control, stay sharp.' : 'Mixed signals, wait for clarity.'}`,
+      technicalAnalysis: `RSI(14) at ${rsi.toFixed(2)} is in ${rsiZone} territory. MACD histogram at ${macd.histogram.toFixed(4)} is ${macd.histogram > 0 ? 'expanding bullish' : 'bearish'}. ADX at ${adx.adx.toFixed(1)} with +DI(${adx.plusDI.toFixed(1)}) ${adx.plusDI > adx.minusDI ? '>' : '<'} -DI(${adx.minusDI.toFixed(1)}) confirms ${trendDir} trend. Balance of Power at ${bop.toFixed(3)} shows ${bop > 0 ? 'buying' : 'selling'} pressure.`,
+      sentimentAnalysis: 'AI backend offline - showing local indicator analysis only. Connect to server for full AI-powered sentiment analysis.',
+      keyConsiderations: [
+        `RSI at ${rsi.toFixed(1)} - ${rsiZone === 'overbought' ? 'watch for reversal' : rsiZone === 'oversold' ? 'potential bounce zone' : 'no extreme readings'}`,
+        `MACD ${macd.macd > macd.signal ? 'above' : 'below'} signal line`,
+        `ADX trend strength: ${adx.adx > 25 ? 'strong' : 'weak'} (${adx.adx.toFixed(1)})`,
+        `${trendDir.charAt(0).toUpperCase() + trendDir.slice(1)} directional pressure`,
+      ],
+      riskWarning: 'Local analysis only - connect to server for full AI analysis with social sentiment.',
+    };
+  };
+
   const handleAIAnalysis = async () => {
     if (candles.length === 0 || isAnalyzing) return;
     
     setIsAnalyzing(true);
+    
+    if (!isBackendAvailable()) {
+      setAiAnalysis(generateLocalAnalysis());
+      setIsAnalyzing(false);
+      return;
+    }
     
     try {
       const indicators = calculateIndicators(candles);
@@ -255,7 +313,7 @@ export default function ChartScreen() {
         symbol,
         price,
         priceChange: priceChangePercent,
-        timeframe: interval,
+        timeframe: timeInterval,
         tradingStyle,
         indicators: {
           rsi: indicators.rsi[lastIndex],
@@ -268,19 +326,11 @@ export default function ChartScreen() {
       });
       
       const analysis = await response.json();
+      if (!analysis.confidence) analysis.confidence = Math.max(analysis.longConfidence || 50, analysis.shortConfidence || 50);
       setAiAnalysis(analysis);
     } catch (error) {
       console.error('AI analysis error:', error);
-      setAiAnalysis({
-        signal: 'NEUTRAL',
-        longConfidence: 50,
-        shortConfidence: 50,
-        summary: 'The matrix is glitching. Try again, punk.',
-        technicalAnalysis: 'Analysis circuits fried. Stand by.',
-        sentimentAnalysis: 'Sentiment scanners offline.',
-        keyConsiderations: ['Wait for system reboot', 'Check your connection'],
-        riskWarning: 'Technical difficulties. Trade with caution.',
-      });
+      setAiAnalysis(generateLocalAnalysis());
     }
     
     setIsAnalyzing(false);
@@ -292,6 +342,31 @@ export default function ChartScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsGeneratingTrade(true);
     
+    if (!isBackendAvailable()) {
+      const p = price || candles[candles.length - 1]?.close || 0;
+      const ind = calculateIndicators(candles);
+      const lastIdx = candles.length - 1;
+      const rsi = ind.rsi[lastIdx] || 50;
+      const isLong = rsi < 50;
+      setTradeIdea({
+        direction: isLong ? 'LONG' : 'SHORT',
+        entryPrice: p,
+        stopLoss: isLong ? p * 0.97 : p * 1.03,
+        takeProfit1: isLong ? p * 1.02 : p * 0.98,
+        takeProfit2: isLong ? p * 1.04 : p * 0.96,
+        takeProfit3: isLong ? p * 1.06 : p * 0.94,
+        riskRewardRatio: '1:2',
+        confidence: Math.abs(rsi - 50) + 30,
+        qualityScore: 2,
+        qualityFactors: ['Local analysis only', 'Based on RSI and price action', 'No AI validation available'],
+        reasoning: `Local trade idea based on RSI(${rsi.toFixed(1)}). Connect to server for AI-powered trade ideas with social sentiment.`,
+        keyLevels: [`Entry: $${p.toFixed(2)}`, `Stop: $${(isLong ? p * 0.97 : p * 1.03).toFixed(2)}`],
+        warnings: ['Local analysis only - no AI validation', 'Verify with your own research'],
+      });
+      setIsGeneratingTrade(false);
+      return;
+    }
+    
     try {
       const indicatorData = calculateIndicators(candles);
       const pivotPoints = calculatePivotPoints(candles);
@@ -302,7 +377,7 @@ export default function ChartScreen() {
       const response = await apiRequest('POST', '/api/trade-idea', {
         symbol,
         price,
-        timeframe: interval,
+        timeframe: timeInterval,
         tradingStyle,
         indicators: {
           rsi: indicatorData.rsi[lastIndex],
@@ -344,7 +419,7 @@ export default function ChartScreen() {
   };
   
   const indicators = calculateIndicators(candles);
-  const riskInfo = getTimeframeRiskLevel(interval, tradingStyle);
+  const riskInfo = getTimeframeRiskLevel(timeInterval, tradingStyle);
   const topPadding = Platform.OS === 'web' ? 67 : insets.top;
   const bottomPadding = Platform.OS === 'web' ? 34 : insets.bottom;
   
@@ -365,7 +440,7 @@ export default function ChartScreen() {
       
       <View style={styles.controlsRow}>
         <TimeframeSelector
-          selected={interval}
+          selected={timeInterval}
           onSelect={handleIntervalChange}
         />
       </View>
@@ -399,7 +474,7 @@ export default function ChartScreen() {
           <RiskWarning
             level={riskInfo.level}
             warning={riskInfo.warning}
-            timeframe={(interval || '1h').toUpperCase()}
+            timeframe={(timeInterval || '1h').toUpperCase()}
           />
           
           <View style={styles.chartSection}>
